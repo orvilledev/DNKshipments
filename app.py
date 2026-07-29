@@ -14,6 +14,7 @@ from packing_list import (
     build_output,
     parse_packing_list,
     to_excel_bytes,
+    upc_display_widths,
 )
 
 st.set_page_config(page_title="Shipment Box Contents Formatter", page_icon="📦", layout="wide")
@@ -141,6 +142,7 @@ except PackingListError as exc:
 
 output = build_output(parsed, combine_duplicates=combine_duplicates)
 dimensions = build_dimensions(parsed, include_box_number=dimensions_box_number)
+upc_widths = upc_display_widths(parsed.lines["UPCs"])
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Order No.", ", ".join(parsed.order_numbers) or "—")
@@ -172,7 +174,11 @@ with contents_tab:
         width="stretch",
         hide_index=True,
         column_config={
-            "UPCs": st.column_config.TextColumn("UPCs"),
+            "UPCs": (
+                st.column_config.NumberColumn("UPCs", format="%d")
+                if pd.api.types.is_numeric_dtype(output["UPCs"])
+                else st.column_config.TextColumn("UPCs")
+            ),
             "Box Number": st.column_config.NumberColumn("Box Number", format="%d"),
             "Quantity": st.column_config.NumberColumn("Quantity", format="%d"),
         },
@@ -191,7 +197,7 @@ excel, contents_csv, dimensions_csv = st.columns(3)
 with excel:
     st.download_button(
         "⬇️ Download Excel (both tabs)",
-        data=to_excel_bytes(output, dimensions, detail),
+        data=to_excel_bytes(output, dimensions, detail, upc_widths=upc_widths),
         file_name=f"{stem} - Box Contents.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",

@@ -3,6 +3,7 @@
 import io
 
 import openpyxl
+import pandas as pd
 
 from packing_list import (
     PackingListError,
@@ -10,6 +11,7 @@ from packing_list import (
     build_output,
     parse_dimensions,
     parse_packing_list,
+    to_excel_bytes,
 )
 
 
@@ -174,5 +176,37 @@ b = [(r, c, "Dimensions: 31.5x19x14" if c == 16 else v) for r, c, v in b]
 dims = build_dimensions(parse_packing_list(write(b)))
 print(dims.to_string(index=False))
 assert dims.loc[0, "Length"] == 31.5 and dims.loc[0, "Width"] == 19
+
+print("\n== case 10: numbers are numbers, non-numeric codes stay text ==")
+b, _ = carton_block(1, "L001", 1, 1, [(111111111, "40", "A", 2), (222222222, "41", "B", 1)])
+parsed = parse_packing_list(write(b))
+out = build_output(parsed)
+print("dtypes:", out.dtypes.to_dict())
+assert all(pd.api.types.is_integer_dtype(out[c]) for c in out.columns), out.dtypes
+
+rows = []
+r = 1
+rows += [
+    (r, 1, "Carton No:"),
+    (r, 5, "L001"),
+    (r, 13, "Carton: 1 of 1"),
+    (r, 16, "Dimensions: 31x19x14"),
+    (r + 1, 3, "Item"),
+    (r + 1, 7, "Size"),
+    (r + 1, 14, "Description"),
+    (r + 1, 21, "Quantity"),
+    (r + 2, 3, "ABC-123"),
+    (r + 2, 8, "40"),
+    (r + 2, 14, "A"),
+    (r + 2, 21, 2),
+]
+alpha = build_output(parse_packing_list(write(rows)))
+print("alphanumeric UPCs dtype:", alpha["UPCs"].dtype, "->", alpha["UPCs"].tolist())
+assert alpha["UPCs"].dtype == object and alpha.loc[0, "UPCs"] == "ABC-123"
+
+wb = openpyxl.load_workbook(io.BytesIO(to_excel_bytes(alpha)))
+cell = wb["Box Contents"]["A2"]
+print("excel cell:", repr(cell.value), cell.number_format)
+assert cell.value == "ABC-123" and cell.number_format == "@"
 
 print("\nall edge cases passed")

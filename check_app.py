@@ -4,6 +4,7 @@ import io
 import textwrap
 from pathlib import Path
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 XLSX = Path(r"C:\Users\Administrator\Downloads\PMSH01 PO# FBA19HZZ856W.xlsx")
@@ -58,7 +59,8 @@ try:
     assert list(main.columns) == ["UPCs", "Box Number", "Quantity"]
     assert main["Box Number"].nunique() == 28
     assert len(main) == 199 and int(main["Quantity"].sum()) == 333
-    assert main["UPCs"].map(type).eq(str).all()
+    print("dtypes:", main.dtypes.to_dict())
+    assert all(pd.api.types.is_integer_dtype(main[c]) for c in main.columns), main.dtypes
     box1 = main[main["Box Number"] == 1]
     print("\nbox 1 as printed:")
     print(box1.to_string(index=False))
@@ -98,11 +100,13 @@ try:
         build_output,
         parse_packing_list,
         to_excel_bytes,
+        upc_display_widths,
     )
 
     parsed = parse_packing_list(XLSX.read_bytes())
     contents = build_output(parsed, combine_duplicates=False)
     dimensions = build_dimensions(parsed)
+    widths = upc_display_widths(parsed.lines["UPCs"])
     cases = [
         ((dimensions, None), ["Box Contents", "Box Dimensions"]),
         ((dimensions, parsed.lines), ["Box Contents", "Box Dimensions", "Details"]),
@@ -110,21 +114,28 @@ try:
     ]
     for (dims_arg, detail_arg), expected in cases:
         wb = openpyxl.load_workbook(
-            io.BytesIO(to_excel_bytes(contents, dims_arg, detail_arg))
+            io.BytesIO(to_excel_bytes(contents, dims_arg, detail_arg, upc_widths=widths))
         )
         print("sheets:", wb.sheetnames)
         assert wb.sheetnames == expected, (wb.sheetnames, expected)
 
     wb = openpyxl.load_workbook(
-        io.BytesIO(to_excel_bytes(contents, dimensions, parsed.lines))
+        io.BytesIO(to_excel_bytes(contents, dimensions, parsed.lines, upc_widths=widths))
     )
     ws = wb["Box Contents"]
-    assert ws["A2"].value == "250780202" and ws["A2"].number_format == "@"
+    assert ws["A2"].value == 250780202 and ws["A2"].number_format == "0"
     upcs = [row[0].value for row in ws.iter_rows(min_row=2, max_col=1)]
-    assert all(isinstance(u, str) for u in upcs), "UPCs must be written as text"
-    padded = sorted({u for u in upcs if u.startswith("0")})
-    print("leading zeros kept as text in the download:", padded)
-    assert padded == ["006020202", "050020202"], padded
+    assert all(isinstance(u, int) for u in upcs), "UPCs must be written as numbers"
+    padded = sorted(
+        {
+            (cell.value, cell.number_format)
+            for row in ws.iter_rows(min_row=2, max_col=1)
+            for cell in row
+            if cell.number_format != "0"
+        }
+    )
+    print("zero-padded number formats in the download:", padded)
+    assert padded == [(6020202, "000000000"), (50020202, "000000000")], padded
 
     ws = wb["Box Dimensions"]
     header = [cell.value for cell in ws[1]]

@@ -67,10 +67,12 @@ shows the result before you download:
 
 ## Notes
 
-- Item numbers are read as they are *displayed* in Excel, so values stored as
-  `50020202` with a 9-digit format come out as `050020202`. Leading zeros are
-  preserved, and the `UPCs` column is written as text so Excel will not strip
-  them on open.
+- Every numeric column (`UPCs`, `Box Number`, `Quantity`, `Length`, `Width`,
+  `Height`) is written as a real number so Excel can sum and sort without the
+  "number stored as text" warning. Item numbers that the packing list prints
+  with a leading zero (for example `050020202`) are still stored as numbers,
+  with a zero-padded Excel format so they display the way they were printed.
+  Alphanumeric codes, when they appear, stay as text.
 - All worksheets in the workbook are parsed, and a carton whose items continue
   onto another print page is kept as a single box.
 - Dimensions are read as `length x width x height` in printed order. Spaces,

@@ -134,6 +134,44 @@ def parse_dimensions(text: str) -> tuple[float | None, float | None, float | Non
     return (values[0], values[1], values[2])
 
 
+def upc_display_widths(upcs: Any) -> dict[int, int]:
+    """Map a UPC's numeric value to the digit count it is printed with.
+
+    Only values with a leading zero need this: 050020202 is stored as the
+    number 50020202, so Excel needs a "000000000" format to print it the way
+    the packing list does.
+    """
+    widths: dict[int, int] = {}
+    for upc in upcs:
+        text = str(upc).strip()
+        if text.isdigit() and text.startswith("0"):
+            value = int(text)
+            widths[value] = max(widths.get(value, 0), len(text))
+    return widths
+
+
+def _numeric_if_possible(series: pd.Series) -> pd.Series:
+    """Convert a column of digit strings to real numbers, or leave it alone.
+
+    Anything that is not numeric all the way down (sizes like "39-40", carton
+    numbers like L00011021774) is left as text.
+    """
+    text = series.astype(str).str.strip()
+    filled = text.ne("")
+    if not filled.any():
+        return series
+    if text.str.match(r"0\d").any():
+        # A leading zero is meaningful, so keep the printed form.
+        return series
+
+    numeric = pd.to_numeric(text.where(filled), errors="coerce")
+    if numeric[filled].isna().any():
+        return series
+    if (numeric.dropna() % 1 == 0).all():
+        return numeric.astype("Int64")
+    return numeric
+
+
 def _to_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -418,6 +456,7 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
             )
 
     lines = pd.DataFrame(all_lines)
+    lines["Size"] = _numeric_if_possible(lines["Size"])
     return ParsedPackingList(
         cartons=cartons,
         lines=lines,
@@ -428,8 +467,17 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
     )
 
 
-def build_output(parsed: ParsedPackingList, combine_duplicates: bool = True) -> pd.DataFrame:
-    """Return the UPCs / Box Number / Quantity table."""
+def build_output(
+    parsed: ParsedPackingList,
+    combine_duplicates: bool = True,
+    numeric_upcs: bool = True,
+) -> pd.DataFrame:
+    """Return the UPCs / Box Number / Quantity table.
+
+    UPCs are grouped as printed strings, then turned into real numbers when
+    every one of them is digits only. Zero-padded UPCs keep their printed form
+    in Excel through a number format, see ``to_excel_bytes``.
+    """
     output = parsed.lines[OUTPUT_COLUMNS].copy()
     if combine_duplicates:
         output = (
@@ -442,6 +490,8 @@ def build_output(parsed: ParsedPackingList, combine_duplicates: bool = True) -> 
     )
     output["Box Number"] = output["Box Number"].astype(int)
     output["Quantity"] = output["Quantity"].astype(int)
+    if numeric_upcs and output["UPCs"].astype(str).str.fullmatch(r"\d+").all():
+        output["UPCs"] = output["UPCs"].astype("int64")
     return output
 
 
@@ -482,7 +532,15 @@ def to_excel_bytes(
     detail: pd.DataFrame | None = None,
     sheet_name: str = "Box Contents",
     dimensions_sheet_name: str = "Box Dimensions",
+    upc_widths: dict[int, int] | None = None,
 ) -> bytes:
+    """Write the tables to a workbook.
+
+    Numeric columns are written as numbers so Excel can sum and sort them
+    without the "number stored as text" warning. ``upc_widths`` supplies the
+    zero-padded display format for UPCs that are printed with a leading zero.
+    """
+    upc_widths = upc_widths or {}
     buffer = io.BytesIO()
     sheets: list[tuple[str, pd.DataFrame]] = [(sheet_name, output)]
     if dimensions is not None and not dimensions.empty:
@@ -505,10 +563,23 @@ def to_excel_bytes(
                 if not frame.empty:
                     width = max(width, int(frame[column].astype(str).str.len().max()) + 2)
                 worksheet.column_dimensions[letter].width = min(width, 46)
-                if column in {"UPCs", "Carton No", "Size", "Order No"}:
-                    for row in worksheet.iter_rows(
-                        min_row=2, min_col=index, max_col=index
-                    ):
-                        for cell in row:
-                            cell.number_format = "@"
+
+                series = frame[column]
+                numeric = pd.api.types.is_numeric_dtype(series)
+                cells = [
+                    cell
+                    for row in worksheet.iter_rows(min_row=2, min_col=index, max_col=index)
+                    for cell in row
+                ]
+                if column == "UPCs" and numeric:
+                    for cell in cells:
+                        pad = upc_widths.get(cell.value) if isinstance(cell.value, int) else None
+                        cell.number_format = "0" * pad if pad else "0"
+                elif pd.api.types.is_integer_dtype(series):
+                    for cell in cells:
+                        cell.number_format = "0"
+                elif not numeric:
+                    # Text format stops Excel reading codes like "39-40" as dates.
+                    for cell in cells:
+                        cell.number_format = "@"
     return buffer.getvalue()
