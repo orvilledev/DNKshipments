@@ -77,14 +77,38 @@ def _validation(parsed: ParsedPackingList, output: pd.DataFrame) -> list[tuple[s
     else:
         checks.append(("ok", f"Dimensions read for all {len(parsed.cartons)} boxes."))
 
+    weighed = [c for c in parsed.cartons if c.total_weight is not None]
+    if not weighed:
+        checks.append(("warning", "No TOTAL WEIGHT column was found — Weight is blank on the dimensions tab."))
+    elif len(weighed) == len(parsed.cartons):
+        total = parsed.total_weight
+        if parsed.reported_net_weight is None:
+            checks.append(("ok", f"Weight read for all {len(weighed)} boxes (sum {total:g})."))
+        elif total is not None and abs(total - parsed.reported_net_weight) <= 0.05:
+            checks.append((
+                "ok",
+                f"Weight matches the file: {total:g} vs Total Net Weight {parsed.reported_net_weight:g}.",
+            ))
+        else:
+            checks.append((
+                "warning",
+                f"Line TOTAL WEIGHT sums to {total:g} but the file's Total Net Weight is "
+                f"{parsed.reported_net_weight:g} — per-box weights still use the line totals.",
+            ))
+    else:
+        checks.append((
+            "warning",
+            f"Weight read for {len(weighed)} of {len(parsed.cartons)} boxes.",
+        ))
+
     return checks
 
 
 st.title("📦 Shipment Box Contents Formatter")
 st.write(
     "Upload a **Package Content List** export and get back a workbook with a "
-    "**UPCs / Box Number / Quantity** tab and a **Length / Width / Height** tab, "
-    "with each carton numbered as a box."
+    "**UPCs / Box Number / Quantity** tab and a **Length / Width / Height / Weight** "
+    "tab, with each carton numbered as a box."
 )
 
 with st.sidebar:
@@ -100,7 +124,7 @@ with st.sidebar:
     dimensions_box_number = st.toggle(
         "Show Box Number on the dimensions tab",
         value=True,
-        help="Turn off for a tab with only the Length, Width and Height columns.",
+        help="Turn off for a tab with only the Length, Width, Height and Weight columns.",
     )
     include_details = st.toggle(
         "Add a 'Details' sheet to the Excel download",
@@ -130,8 +154,9 @@ if uploaded is None:
             "- **Quantity** — the units of that UPC in that box.\n\n"
             "**Tab 2 — Box Dimensions**\n"
             "- **Length / Width / Height** — split from each carton's "
-            "`Dimensions: 31x19x14` label, so length 31, width 19, height 14, one "
-            "row per box.\n\n"
+            "`Dimensions: 31x19x14` label, so length 31, width 19, height 14.\n"
+            "- **Weight** — the sum of that carton's `TOTAL WEIGHT` line values "
+            "(one row per box).\n\n"
             "The totals are reconciled against the *Carton Total*, *Total # of Cartons* "
             "and *Total Quantity* figures printed in the file, so you can see at a "
             "glance that nothing was dropped."
@@ -190,8 +215,8 @@ with contents_tab:
 with dimensions_tab:
     st.dataframe(dimensions, width="stretch", hide_index=True)
     st.caption(
-        "Read from each carton's 'Dimensions' label — the first number is the "
-        "length, the second the width, the third the height."
+        "Length / Width / Height come from each carton's Dimensions label. "
+        "Weight is the sum of that carton's TOTAL WEIGHT column."
     )
 
 stem = Path(uploaded.name).stem
@@ -231,6 +256,7 @@ with st.expander("Per-box summary"):
                 "Box Number": carton.box_number,
                 "Carton No": carton.carton_no,
                 "Dimensions": carton.dimensions,
+                "Weight": carton.total_weight,
                 "UPCs in box": len({line["UPCs"] for line in carton.lines}),
                 "Quantity": carton.parsed_total,
                 "Carton Total in file": carton.reported_total,

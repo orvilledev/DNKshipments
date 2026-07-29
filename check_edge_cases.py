@@ -362,4 +362,67 @@ print(out.to_string(index=False))
 assert out["UPCs"].tolist() == [673088000001, 673088000002], out["UPCs"].tolist()
 assert not parsed.warnings
 
+print("\n== case 14: TOTAL WEIGHT summed per box onto the dimensions tab ==")
+rows = [
+    (1, 1, "Carton No:"),
+    (1, 5, "L001"),
+    (1, 13, "Carton: 1 of 2"),
+    (1, 16, "Dimensions: 31x19x14"),
+    (2, 3, "Item"),
+    (2, 7, "Size"),
+    (2, 15, "UPC"),
+    (2, 16, "Description"),
+    (2, 21, "Quantity"),
+    (2, 26, "WEIGHT"),
+    (2, 27, "TOTAL WEIGHT"),
+    (3, 3, 111),
+    (3, 8, 40),
+    (3, 15, "673088000001"),
+    (3, 16, "A"),
+    (3, 21, 2),
+    (3, 26, 1.5),
+    (3, 27, 3.0),
+    (4, 3, 222),
+    (4, 8, 41),
+    (4, 15, "673088000002"),
+    (4, 16, "B"),
+    (4, 21, 1),
+    (4, 26, 2.05),
+    (4, 27, 2.05),
+    (5, 17, "Carton Total:"),
+    (5, 21, 3),
+    (7, 1, "Carton No:"),
+    (7, 5, "L002"),
+    (7, 13, "Carton: 2 of 2"),
+    (7, 16, "Dimensions: 27x19x14"),
+    (8, 3, "Item"),
+    (8, 7, "Size"),
+    (8, 16, "Description"),  # WEIGHT/TOTAL WEIGHT labels omitted — sticky
+    (8, 21, "Quantity"),
+    (9, 3, 333),
+    (9, 8, 42),
+    (9, 15, "673088000003"),
+    (9, 16, "C"),
+    (9, 21, 4),
+    (9, 26, 2.0),
+    (9, 27, 8.0),
+    (10, 17, "Carton Total:"),
+    (10, 21, 4),
+    (12, 2, "Total Net Weight:"),
+    (12, 10, 13.05),
+    (12, 14, "Total # of Cartons:"),
+    (12, 18, 2),
+    (12, 23, "Total Quantity:"),
+    (12, 26, 7),
+]
+parsed = parse_packing_list(write(rows))
+dims = build_dimensions(parsed)
+print(dims.to_string(index=False))
+print("reported net weight:", parsed.reported_net_weight, "parsed:", parsed.total_weight)
+assert list(dims.columns) == ["Box Number", "Length", "Width", "Height", "Weight"]
+assert list(dims["Weight"]) == [5.05, 8.0]
+assert parsed.reported_net_weight == 13.05
+assert abs(parsed.total_weight - 13.05) < 0.001
+assert not parsed.warnings
+
 print("\nall edge cases passed")

@@ -16,6 +16,7 @@ CARTON_TOTAL_LABEL = "carton total:"
 ORDER_LABEL = "order no."
 GRAND_TOTAL_LABEL = "total # of cartons:"
 GRAND_QTY_LABEL = "total quantity:"
+NET_WEIGHT_LABEL = "total net weight:"
 
 ITEM = "item"
 UPC = "upc"
@@ -23,6 +24,8 @@ SIZE = "size"
 DESCRIPTION = "description"
 QUANTITY = "quantity"
 UOM = "uom"
+UNIT_WEIGHT = "unit_weight"
+TOTAL_WEIGHT = "total_weight"
 
 HEADER_ALIASES = {
     "item": ITEM,
@@ -43,6 +46,13 @@ HEADER_ALIASES = {
     "unit of measure code": UOM,
     "unit of measure": UOM,
     "uom": UOM,
+    "weight": UNIT_WEIGHT,
+    "unit weight": UNIT_WEIGHT,
+    "wt": UNIT_WEIGHT,
+    "total weight": TOTAL_WEIGHT,
+    "totalweight": TOTAL_WEIGHT,
+    "ext weight": TOTAL_WEIGHT,
+    "extended weight": TOTAL_WEIGHT,
 }
 
 # Optional columns that often appear only on the first carton header, then keep
@@ -50,14 +60,15 @@ HEADER_ALIASES = {
 # UPC may sit in column O, P, or elsewhere depending on the export — wherever
 # the "UPC" header is found is treated as the source of truth, and if a later
 # carton reprints "UPC" in a different column the sticky mapping moves with it.
-STICKY_FIELDS = {UPC}
+# WEIGHT / TOTAL WEIGHT behave the same way.
+STICKY_FIELDS = {UPC, UNIT_WEIGHT, TOTAL_WEIGHT}
 
 CARTON_SEQ_RE = re.compile(r"carton:\s*(\d+)\s*of\s*(\d+)", re.IGNORECASE)
 DIMENSIONS_RE = re.compile(r"dimensions:\s*(.+)", re.IGNORECASE)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 OUTPUT_COLUMNS = ["UPCs", "Box Number", "Quantity"]
-DIMENSION_COLUMNS = ["Box Number", "Length", "Width", "Height"]
+DIMENSION_COLUMNS = ["Box Number", "Length", "Width", "Height", "Weight"]
 
 
 class PackingListError(Exception):
@@ -81,6 +92,18 @@ class Carton:
     def parsed_total(self) -> int:
         return sum(line["Quantity"] for line in self.lines)
 
+    @property
+    def total_weight(self) -> float | None:
+        """Sum of each line's TOTAL WEIGHT in this carton, if any were present."""
+        weights = [
+            line["Total Weight"]
+            for line in self.lines
+            if line.get("Total Weight") is not None
+        ]
+        if not weights:
+            return None
+        return float(sum(weights))
+
 
 @dataclass
 class ParsedPackingList:
@@ -88,12 +111,22 @@ class ParsedPackingList:
     lines: pd.DataFrame
     reported_carton_count: int | None = None
     reported_total_quantity: int | None = None
+    reported_net_weight: float | None = None
     order_numbers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
     def total_quantity(self) -> int:
         return int(self.lines["Quantity"].sum()) if not self.lines.empty else 0
+
+    @property
+    def total_weight(self) -> float | None:
+        if self.lines.empty or "Total Weight" not in self.lines.columns:
+            return None
+        weights = self.lines["Total Weight"].dropna()
+        if weights.empty:
+            return None
+        return float(weights.sum())
 
 
 def _text(value: Any) -> str:
@@ -203,6 +236,20 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _to_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = _text(value).replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def _row_cells(row: tuple[Any, ...]) -> list[tuple[int, Any]]:
     """Non-empty cells of a row as (column index, cell) pairs."""
     return [(cell.column, cell) for cell in row if _text(cell.value) != ""]
@@ -307,6 +354,7 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
     order_numbers: list[str] = []
     reported_carton_count: int | None = None
     reported_total_quantity: int | None = None
+    reported_net_weight: float | None = None
 
     current: Carton | None = None
     header_map: dict[int, str] | None = None
@@ -334,6 +382,19 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                     if value not in order_numbers:
                         order_numbers.append(value)
                 continue
+
+            net_weight_col = _find_label(labels, NET_WEIGHT_LABEL)
+            if net_weight_col is not None:
+                reported_net_weight = next(
+                    (
+                        _to_float(c.value)
+                        for col, c in cells
+                        if col > net_weight_col and _to_float(c.value) is not None
+                    ),
+                    reported_net_weight,
+                )
+                # The same footer row also carries carton/quantity totals — keep going
+                # so those labels on this row are still read below.
 
             total_col = _find_label(labels, GRAND_TOTAL_LABEL)
             if total_col is not None:
@@ -452,6 +513,8 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                     values[field_name] = _display_number(cell.value, cell.number_format)
                 elif field_name == QUANTITY:
                     values[QUANTITY] = _to_int(cell.value)
+                elif field_name in {UNIT_WEIGHT, TOTAL_WEIGHT}:
+                    values[field_name] = _to_float(cell.value)
                 else:
                     values[field_name] = _text(cell.value)
 
@@ -468,6 +531,11 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                 )
                 continue
 
+            unit_weight = values.get(UNIT_WEIGHT)
+            total_weight = values.get(TOTAL_WEIGHT)
+            if total_weight is None and unit_weight is not None:
+                total_weight = float(unit_weight) * int(quantity)
+
             current.lines.append(
                 {
                     "UPCs": upc,
@@ -477,6 +545,8 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                     "Size": _text(values.get(SIZE)),
                     "Description": _text(values.get(DESCRIPTION)),
                     "Unit of Measure Code": _text(values.get(UOM)),
+                    "Unit Weight": unit_weight,
+                    "Total Weight": total_weight,
                     "Carton No": current.carton_no,
                     "Dimensions": current.dimensions,
                     "Order No": current.order_no,
@@ -520,6 +590,7 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
         lines=lines,
         reported_carton_count=reported_carton_count,
         reported_total_quantity=reported_total_quantity,
+        reported_net_weight=reported_net_weight,
         order_numbers=order_numbers,
         warnings=warnings,
     )
@@ -556,13 +627,14 @@ def build_output(
 def build_dimensions(
     parsed: ParsedPackingList, include_box_number: bool = True
 ) -> pd.DataFrame:
-    """Return one row per box with its Length, Width and Height."""
+    """Return one row per box with Length, Width, Height and total Weight."""
     rows = [
         {
             "Box Number": carton.box_number,
             "Length": carton.length,
             "Width": carton.width,
             "Height": carton.height,
+            "Weight": carton.total_weight,
         }
         for carton in parsed.cartons
     ]
@@ -571,7 +643,7 @@ def build_dimensions(
     dimensions = dimensions.sort_values("Box Number", kind="stable", ignore_index=True)
     dimensions["Box Number"] = dimensions["Box Number"].astype(int)
 
-    for column in ("Length", "Width", "Height"):
+    for column in ("Length", "Width", "Height", "Weight"):
         values = pd.to_numeric(dimensions[column], errors="coerce")
         present = values.dropna()
         # Whole numbers should read as 31, not 31.0.

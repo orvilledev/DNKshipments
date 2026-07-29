@@ -19,13 +19,14 @@ UPCs column. Older exports that only print `Item` still work — Item is used
 as the fallback.
 
 **Tab 2 — Box Dimensions:** the carton's `Dimensions: 31x19x14` label split into
-its three numbers, in printed order, one row per box.
+its three numbers, plus the box's total weight (sum of the `TOTAL WEIGHT` line
+values), one row per box.
 
-| Box Number | Length | Width | Height |
-| --- | --- | --- | --- |
-| 1 | 31 | 19 | 14 |
-| 2 | 31 | 19 | 14 |
-| ... | ... | ... | ... |
+| Box Number | Length | Width | Height | Weight |
+| --- | --- | --- | --- | --- |
+| 1 | 31 | 19 | 14 | 29.05 |
+| 2 | 31 | 19 | 14 | 28.25 |
+| ... | ... | ... | ... | ... |
 
 ## Run it
 
@@ -53,7 +54,7 @@ minutes or fail outright.
   with the quantities added together, which is what Amazon FBA box content
   expects.
 - **Show Box Number on the dimensions tab** (default on) — turn it off for a tab
-  with only the Length, Width and Height columns.
+  with only the Length, Width, Height and Weight columns.
 - **Add a 'Details' sheet** — appends size, description, unit of measure, carton
   number, dimensions, order number and the source row of the original file for
   auditing.
@@ -67,6 +68,8 @@ shows the result before you download:
 - total units vs `Total Quantity:`
 - each box's units vs its own `Carton Total:`
 - every box has readable dimensions
+- weight is read from `TOTAL WEIGHT` when present (and compared to
+  `Total Net Weight:` when the file prints one)
 
 ## Notes
 
@@ -79,8 +82,10 @@ shows the result before you download:
 - When a `UPC` header is present, those barcode values are used for the output
   UPCs column instead of the `Item` number. Later cartons often drop the UPC
   label while keeping the values in the same column; the parser remembers that
-  column for the rest of the sheet. Extra header labels such as `Weight` are
-  ignored and do not break parsing.
+  column for the rest of the sheet. `WEIGHT` / `TOTAL WEIGHT` are sticky the
+  same way. Extra header labels do not break parsing.
+- Box Weight is the sum of each line's `TOTAL WEIGHT` in that carton. If only
+  unit `WEIGHT` is present, quantity × unit weight is used instead.
 - All worksheets in the workbook are parsed, and a carton whose items continue
   onto another print page is kept as a single box.
 - Dimensions are read as `length x width x height` in printed order. Spaces,
