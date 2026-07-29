@@ -266,4 +266,100 @@ assert parsed.lines["Item"].tolist() == ["906020202", "238581212"]
 assert list(build_dimensions(parsed)["Length"]) == [31, 27]
 assert not parsed.warnings
 
+print("\n== case 12: UPC header in column O (not P), sticky for later cartons ==")
+# Matches PMSH01 PO FBA19HZZ856W.xlsx: UPC at O, Description at P, Quantity at W.
+rows = [
+    (1, 1, "Order No."),
+    (1, 5, "SO-OCOL"),
+    (2, 1, "Carton No:"),
+    (2, 5, "L001"),
+    (2, 13, "Carton: 1 of 2"),
+    (2, 18, "Dimensions: 31x19x14"),
+    (3, 29, "Unit of Measure Code"),
+    (4, 3, "Item"),
+    (4, 7, "Size"),
+    (4, 15, "UPC"),  # column O
+    (4, 16, "Description"),  # column P
+    (4, 23, "Quantity"),  # column W
+    (4, 26, "WEIGHT"),
+    (4, 27, "TOTAL WEIGHT"),
+    (5, 3, 250780202),
+    (5, 8, 45),
+    (5, 14, "25078020245"),  # item+size concat in N — must NOT be used as UPC
+    (5, 15, "673088044978"),
+    (5, 16, "Karl Antique Brown/Blk"),
+    (5, 23, 1),
+    (5, 29, "PAIR"),
+    (6, 19, "Carton Total:"),
+    (6, 23, 1),
+    (8, 1, "Carton No:"),
+    (8, 5, "L002"),
+    (8, 13, "Carton: 2 of 2"),
+    (8, 18, "Dimensions: 31x19x14"),
+    (9, 3, "Item"),
+    (9, 7, "Size"),
+    (9, 16, "Description"),  # UPC label omitted
+    (9, 23, "Quantity"),
+    (10, 3, 4146020200),
+    (10, 8, 39),
+    (10, 14, "414602020039"),
+    (10, 15, "673088421656"),  # still in column O
+    (10, 16, "Kaci Black Molded"),
+    (10, 23, 2),
+    (11, 19, "Carton Total:"),
+    (11, 23, 2),
+    (13, 14, "Total # of Cartons:"),
+    (13, 18, 2),
+    (13, 23, "Total Quantity:"),
+    (13, 26, 3),
+]
+parsed = parse_packing_list(write(rows))
+out = build_output(parsed, combine_duplicates=False)
+print(out.to_string(index=False))
+assert out["UPCs"].tolist() == [673088044978, 673088421656], out["UPCs"].tolist()
+assert parsed.lines["Item"].tolist() == ["250780202", "4146020200"]
+assert parsed.total_quantity == 3 and not parsed.warnings
+
+print("\n== case 13: UPC header moves from column O to column P mid-file ==")
+rows = [
+    (1, 1, "Carton No:"),
+    (1, 5, "L001"),
+    (1, 13, "Carton: 1 of 2"),
+    (1, 16, "Dimensions: 31x19x14"),
+    (2, 3, "Item"),
+    (2, 7, "Size"),
+    (2, 15, "UPC"),
+    (2, 16, "Description"),
+    (2, 21, "Quantity"),
+    (3, 3, 111),
+    (3, 8, 40),
+    (3, 15, "673088000001"),
+    (3, 16, "A"),
+    (3, 21, 1),
+    (4, 17, "Carton Total:"),
+    (4, 21, 1),
+    (6, 1, "Carton No:"),
+    (6, 5, "L002"),
+    (6, 13, "Carton: 2 of 2"),
+    (6, 16, "Dimensions: 27x19x14"),
+    (7, 3, "Item"),
+    (7, 7, "Size"),
+    (7, 16, "UPC"),  # moved to P
+    (7, 17, "Description"),
+    (7, 21, "Quantity"),
+    (8, 3, 222),
+    (8, 8, 41),
+    (8, 15, "22241"),  # leftover in old column — must be ignored
+    (8, 16, "673088000002"),
+    (8, 17, "B"),
+    (8, 21, 2),
+    (9, 17, "Carton Total:"),
+    (9, 21, 2),
+]
+parsed = parse_packing_list(write(rows))
+out = build_output(parsed, combine_duplicates=False)
+print(out.to_string(index=False))
+assert out["UPCs"].tolist() == [673088000001, 673088000002], out["UPCs"].tolist()
+assert not parsed.warnings
+
 print("\nall edge cases passed")

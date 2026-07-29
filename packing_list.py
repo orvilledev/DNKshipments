@@ -47,6 +47,9 @@ HEADER_ALIASES = {
 
 # Optional columns that often appear only on the first carton header, then keep
 # the same column for the rest of the sheet even when the label is omitted.
+# UPC may sit in column O, P, or elsewhere depending on the export — wherever
+# the "UPC" header is found is treated as the source of truth, and if a later
+# carton reprints "UPC" in a different column the sticky mapping moves with it.
 STICKY_FIELDS = {UPC}
 
 CARTON_SEQ_RE = re.compile(r"carton:\s*(\d+)\s*of\s*(\d+)", re.IGNORECASE)
