@@ -198,6 +198,74 @@ def upc_display_widths(upcs: Any) -> dict[int, int]:
     return widths
 
 
+def _is_item_size_concat(text: str, item: str, size: str) -> bool:
+    """True when ``text`` is just the item number, or item glued to size."""
+    if not text or not item:
+        return False
+    if text == item:
+        return True
+    if size and text == f"{item}{size}":
+        return True
+    return False
+
+
+def _looks_like_barcode(text: str, item: str = "", size: str = "") -> bool:
+    """Heuristic for a real UPC/GTIN sitting in an unlabeled column."""
+    text = _text(text)
+    if not text.isdigit():
+        return False
+    if not (6 <= len(text) <= 14):
+        return False
+    if _is_item_size_concat(text, _text(item), _text(size)):
+        return False
+    return True
+
+
+def _header_column(header_map: dict[int, str], field: str) -> int | None:
+    for col, name in header_map.items():
+        if name == field:
+            return col
+    return None
+
+
+def _infer_upc_from_row(
+    cells: list[tuple[int, Any]],
+    header_map: dict[int, str],
+    item: str,
+    size: str,
+) -> tuple[int, str] | None:
+    """Find an unlabeled barcode between Size and Description.
+
+    Some Package Content List exports put the real UPC in a column with no
+    header (often N or O). Neighbouring Item+Size concatenations are ignored.
+    Returns ``(column, upc_text)`` for the best candidate, or ``None``.
+    """
+    if UPC in header_map.values():
+        return None
+
+    left = _header_column(header_map, SIZE) or _header_column(header_map, ITEM) or 0
+    right = _header_column(header_map, DESCRIPTION) or _header_column(
+        header_map, QUANTITY
+    )
+    if right is None:
+        return None
+
+    candidates: list[tuple[int, str]] = []
+    for col, cell in cells:
+        if col <= left or col >= right:
+            continue
+        if col in header_map:
+            continue
+        text = _display_number(cell.value, cell.number_format)
+        if _looks_like_barcode(text, item, size):
+            candidates.append((col, text))
+
+    if not candidates:
+        return None
+    # Rightmost unlabeled barcode is usually the true UPC (just left of Description).
+    return candidates[-1]
+
+
 def _numeric_if_possible(series: pd.Series) -> pd.Series:
     """Convert a column of digit strings to real numbers, or leave it alone.
 
@@ -518,9 +586,23 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                 else:
                     values[field_name] = _text(cell.value)
 
-            # Prefer the dedicated UPC column when the packing list has one;
-            # fall back to Item for older exports that only print Item.
-            upc = _text(values.get(UPC)) or _text(values.get(ITEM))
+            # Prefer an explicit/sticky UPC column. If the export omitted the UPC
+            # header entirely, infer the barcode column between Size and Description.
+            # Only then fall back to Item (older exports with no barcodes at all).
+            upc = _text(values.get(UPC))
+            if not upc:
+                inferred = _infer_upc_from_row(
+                    cells,
+                    header_map,
+                    _text(values.get(ITEM)),
+                    _text(values.get(SIZE)),
+                )
+                if inferred is not None:
+                    inferred_col, upc = inferred
+                    sticky_headers = _update_sticky(sticky_headers, {inferred_col: UPC})
+                    header_map = {**header_map, inferred_col: UPC}
+            if not upc:
+                upc = _text(values.get(ITEM))
             quantity = values.get(QUANTITY)
             if not upc:
                 continue

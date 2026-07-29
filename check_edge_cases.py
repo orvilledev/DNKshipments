@@ -425,4 +425,76 @@ assert parsed.reported_net_weight == 13.05
 assert abs(parsed.total_weight - 13.05) < 0.001
 assert not parsed.warnings
 
+print("\n== case 15: no UPC header — infer barcode between Size and Description ==")
+# Matches FBA19HZZ3D5V: no UPC label, barcodes duplicated in N and O.
+rows = [
+    (1, 1, "Carton No:"),
+    (1, 5, "L001"),
+    (1, 13, "Carton: 1 of 2"),
+    (1, 18, "Dimensions: 31x19x14"),
+    (2, 3, "Item"),
+    (2, 7, "Size"),
+    (2, 16, "Description"),
+    (2, 21, "Quantity"),
+    (2, 26, "WEIGHT"),
+    (2, 27, "TOTAL WEIGHT"),
+    (3, 3, 3950750002),
+    (3, 8, 39),
+    (3, 14, "673088519070"),  # N
+    (3, 15, "673088519070"),  # O — same barcode, no header
+    (3, 16, "XP 2.0 Clog Navy Patent"),
+    (3, 21, 3),
+    (3, 26, 2.45),
+    (3, 27, 7.35),
+    (4, 17, "Carton Total:"),
+    (4, 21, 3),
+    (6, 1, "Carton No:"),
+    (6, 5, "L002"),
+    (6, 13, "Carton: 2 of 2"),
+    (6, 18, "Dimensions: 31x19x14"),
+    (7, 3, "Item"),
+    (7, 7, "Size"),
+    (7, 16, "Description"),
+    (7, 21, "Quantity"),
+    (8, 3, 3950750002),
+    (8, 8, 36),
+    (8, 14, "673088519049"),
+    (8, 15, "673088519049"),
+    (8, 16, "XP 2.0 Clog Navy Patent"),
+    (8, 21, 1),
+    (8, 26, 2.3),
+    (8, 27, 2.3),
+    (9, 17, "Carton Total:"),
+    (9, 21, 1),
+]
+parsed = parse_packing_list(write(rows))
+out = build_output(parsed, combine_duplicates=False)
+print(out.to_string(index=False))
+assert out["UPCs"].tolist() == [673088519070, 673088519049], out["UPCs"].tolist()
+assert parsed.lines["Item"].tolist() == ["3950750002", "3950750002"]
+assert list(build_dimensions(parsed)["Weight"]) == [7.35, 2.3]
+
+print("\n== case 16: unlabeled item+size concat must not beat a real UPC beside it ==")
+rows = [
+    (1, 1, "Carton No:"),
+    (1, 5, "L001"),
+    (1, 13, "Carton: 1 of 1"),
+    (1, 18, "Dimensions: 31x19x14"),
+    (2, 3, "Item"),
+    (2, 7, "Size"),
+    (2, 16, "Description"),
+    (2, 21, "Quantity"),
+    (3, 3, 250780202),
+    (3, 8, 45),
+    (3, 14, "25078020245"),  # item+size — must be ignored
+    (3, 15, "673088044978"),  # true UPC, still unlabeled
+    (3, 16, "Karl Antique Brown/Blk"),
+    (3, 21, 1),
+    (4, 17, "Carton Total:"),
+    (4, 21, 1),
+]
+out = build_output(parse_packing_list(write(rows)), combine_duplicates=False)
+print(out.to_string(index=False))
+assert out["UPCs"].tolist() == [673088044978], out["UPCs"].tolist()
+
 print("\nall edge cases passed")

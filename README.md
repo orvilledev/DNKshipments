@@ -84,6 +84,10 @@ shows the result before you download:
   label while keeping the values in the same column; the parser remembers that
   column for the rest of the sheet. `WEIGHT` / `TOTAL WEIGHT` are sticky the
   same way. Extra header labels do not break parsing.
+- If the export omits the `UPC` header entirely, the parser still finds the
+  barcode in the unlabeled columns between Size and Description (and ignores
+  neighbouring Item+Size concatenations). Only exports with no barcodes at all
+  fall back to Item.
 - Box Weight is the sum of each line's `TOTAL WEIGHT` in that carton. If only
   unit `WEIGHT` is present, quantity × unit weight is used instead.
 - All worksheets in the workbook are parsed, and a carton whose items continue
