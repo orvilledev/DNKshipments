@@ -209,4 +209,61 @@ cell = wb["Box Contents"]["A2"]
 print("excel cell:", repr(cell.value), cell.number_format)
 assert cell.value == "ABC-123" and cell.number_format == "@"
 
+print("\n== case 11: UPC column preferred over Item, and sticky across cartons ==")
+# Carton 1 header includes UPC (col P=16). Carton 2 omits the UPC label but
+# still puts UPC values in column P — matching the real Dansko export.
+rows = [
+    (1, 1, "Order No."),
+    (1, 5, "SO-UPC"),
+    (2, 1, "Carton No:"),
+    (2, 5, "L001"),
+    (2, 13, "Carton: 1 of 2"),
+    (2, 16, "Dimensions: 31x19x14"),
+    (3, 25, "Unit of Measure Code"),
+    (4, 3, "Item"),
+    (4, 7, "Size"),
+    (4, 16, "UPC"),
+    (4, 17, "Description"),
+    (4, 21, "Quantity"),
+    (4, 28, "Weight"),
+    (4, 29, "TOTAL WEIGHT"),
+    (5, 3, 906020202),
+    (5, 8, 38),
+    (5, 16, "673088939052"),
+    (5, 17, "Professional Black Tooled"),
+    (5, 21, 4),
+    (5, 25, "PAIR"),
+    (6, 17, "Carton Total:"),
+    (6, 21, 4),
+    (8, 1, "Carton No:"),
+    (8, 5, "L002"),
+    (8, 13, "Carton: 2 of 2"),
+    (8, 16, "Dimensions: 27x19x14"),
+    (9, 3, "Item"),
+    (9, 7, "Size"),
+    (9, 17, "Description"),
+    (9, 21, "Quantity"),
+    (10, 3, 238581212),
+    (10, 8, 39),
+    (10, 16, "673088460655"),
+    (10, 17, "Ingrid Honey Distressed"),
+    (10, 21, 3),
+    (11, 17, "Carton Total:"),
+    (11, 21, 3),
+    (13, 2, "Total Net Weight:"),
+    (13, 14, "Total # of Cartons:"),
+    (13, 18, 2),
+    (13, 23, "Total Quantity:"),
+    (13, 26, 7),
+]
+parsed = parse_packing_list(write(rows))
+out = build_output(parsed, combine_duplicates=False)
+print(out.to_string(index=False))
+print("detail Item column:", parsed.lines["Item"].tolist())
+assert parsed.total_quantity == 7 and len(parsed.cartons) == 2
+assert out["UPCs"].tolist() == [673088939052, 673088460655]
+assert parsed.lines["Item"].tolist() == ["906020202", "238581212"]
+assert list(build_dimensions(parsed)["Length"]) == [31, 27]
+assert not parsed.warnings
+
 print("\nall edge cases passed")

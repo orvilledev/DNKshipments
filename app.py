@@ -120,8 +120,12 @@ if uploaded is None:
     with st.expander("What the app produces"):
         st.markdown(
             "**Tab 1 — Box Contents**\n"
-            "- **UPCs** — the `Item` number from the packing list, kept exactly as "
-            "printed (including any leading zeros).\n"
+            "- **UPCs** — taken from the packing list's `UPC` column when it is "
+            "present (often around column P). If a later carton drops the UPC "
+            "label but keeps the values in the same column, that column is still "
+            "used. Older exports without a UPC column fall back to the `Item` "
+            "number. Values are kept exactly as printed (including any leading "
+            "zeros).\n"
             "- **Box Number** — 1 for the first carton, 2 for the second, and so on.\n"
             "- **Quantity** — the units of that UPC in that box.\n\n"
             "**Tab 2 — Box Dimensions**\n"

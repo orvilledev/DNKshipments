@@ -10,10 +10,13 @@ Each `Carton No:` block in the export becomes one box, numbered from the
 
 | UPCs | Box Number | Quantity |
 | --- | --- | --- |
-| 250780202 | 1 | 1 |
-| 3951320202 | 1 | 3 |
-| 4144180200 | 1 | 4 |
+| 673088939052 | 1 | 4 |
+| 673088514136 | 1 | 1 |
 | ... | ... | ... |
+
+When the packing list has a dedicated `UPC` column, that is what fills the
+UPCs column. Older exports that only print `Item` still work — Item is used
+as the fallback.
 
 **Tab 2 — Box Dimensions:** the carton's `Dimensions: 31x19x14` label split into
 its three numbers, in printed order, one row per box.
@@ -73,6 +76,11 @@ shows the result before you download:
   with a leading zero (for example `050020202`) are still stored as numbers,
   with a zero-padded Excel format so they display the way they were printed.
   Alphanumeric codes, when they appear, stay as text.
+- When a `UPC` header is present, those barcode values are used for the output
+  UPCs column instead of the `Item` number. Later cartons often drop the UPC
+  label while keeping the values in the same column; the parser remembers that
+  column for the rest of the sheet. Extra header labels such as `Weight` are
+  ignored and do not break parsing.
 - All worksheets in the workbook are parsed, and a carton whose items continue
   onto another print page is kept as a single box.
 - Dimensions are read as `length x width x height` in printed order. Spaces,

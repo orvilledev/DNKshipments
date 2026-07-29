@@ -18,6 +18,7 @@ GRAND_TOTAL_LABEL = "total # of cartons:"
 GRAND_QTY_LABEL = "total quantity:"
 
 ITEM = "item"
+UPC = "upc"
 SIZE = "size"
 DESCRIPTION = "description"
 QUANTITY = "quantity"
@@ -28,6 +29,13 @@ HEADER_ALIASES = {
     "item no": ITEM,
     "item no.": ITEM,
     "item number": ITEM,
+    "upc": UPC,
+    "upcs": UPC,
+    "upc code": UPC,
+    "upc#": UPC,
+    "gtin": UPC,
+    "ean": UPC,
+    "barcode": UPC,
     "size": SIZE,
     "description": DESCRIPTION,
     "quantity": QUANTITY,
@@ -36,6 +44,10 @@ HEADER_ALIASES = {
     "unit of measure": UOM,
     "uom": UOM,
 }
+
+# Optional columns that often appear only on the first carton header, then keep
+# the same column for the rest of the sheet even when the label is omitted.
+STICKY_FIELDS = {UPC}
 
 CARTON_SEQ_RE = re.compile(r"carton:\s*(\d+)\s*of\s*(\d+)", re.IGNORECASE)
 DIMENSIONS_RE = re.compile(r"dimensions:\s*(.+)", re.IGNORECASE)
@@ -208,21 +220,55 @@ def _header_map(cells: list[tuple[int, Any]]) -> tuple[dict[int, str], bool] | N
     """Map the column of each recognised header to its canonical field name.
 
     Returns ``(headers, is_complete)``, where a complete row carries both Item
-    and Quantity. "Unit of Measure Code" is printed on its own row above the
-    other headers, so partial rows are reported too. ``None`` means the row is
-    not a header row at all.
+    and Quantity. Extra labels such as Weight are ignored so they do not stop
+    the row from counting as a header. "Unit of Measure Code" is printed on its
+    own row above the other headers, so partial rows are reported too. ``None``
+    means the row is not a header row at all.
     """
     found: dict[int, str] = {}
     for col, cell in cells:
         key = _text(cell.value).lower().rstrip(":")
         field_name = HEADER_ALIASES.get(key)
-        if field_name is None:
-            return None
-        found[col] = field_name
+        if field_name is not None:
+            found[col] = field_name
     if not found:
         return None
     complete = ITEM in found.values() and QUANTITY in found.values()
     return found, complete
+
+
+def _merge_headers(
+    found: dict[int, str],
+    pending: dict[int, str],
+    sticky: dict[int, str],
+) -> dict[int, str]:
+    """Combine a new header row with pending and sticky optional columns.
+
+    Sticky columns (notably UPC) often appear only on the first carton header;
+    later cartons drop the label but keep the values in the same column.
+    """
+    found_fields = set(found.values())
+    pending_fields = set(pending.values())
+    kept_sticky = {
+        col: field
+        for col, field in sticky.items()
+        if col not in found
+        and col not in pending
+        and field not in found_fields
+        and field not in pending_fields
+    }
+    return {**kept_sticky, **pending, **found}
+
+
+def _update_sticky(sticky: dict[int, str], found: dict[int, str]) -> dict[int, str]:
+    """Remember optional columns from a header so later cartons can reuse them."""
+    updated = dict(sticky)
+    for col, field in found.items():
+        if field not in STICKY_FIELDS:
+            continue
+        updated = {c: f for c, f in updated.items() if f != field}
+        updated[col] = field
+    return updated
 
 
 def _field_for_column(column: int, header_map: dict[int, str]) -> str | None:
@@ -262,9 +308,12 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
     current: Carton | None = None
     header_map: dict[int, str] | None = None
     pending_headers: dict[int, str] = {}
+    sticky_headers: dict[int, str] = {}
     current_order = ""
 
     for worksheet in workbook.worksheets:
+        # Sticky optional columns are per-sheet; a fresh sheet may place UPC elsewhere.
+        sticky_headers = {}
         for row in worksheet.iter_rows():
             cells = _row_cells(row)
             if not cells:
@@ -377,12 +426,15 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
             if maybe_header is not None:
                 found, complete = maybe_header
                 if complete:
-                    header_map = {**pending_headers, **found}
+                    header_map = _merge_headers(found, pending_headers, sticky_headers)
+                    sticky_headers = _update_sticky(sticky_headers, found)
                     pending_headers = {}
                 elif header_map is not None:
                     header_map.update(found)
+                    sticky_headers = _update_sticky(sticky_headers, found)
                 else:
                     pending_headers.update(found)
+                    sticky_headers = _update_sticky(sticky_headers, found)
                 continue
 
             if current is None or header_map is None:
@@ -393,14 +445,16 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                 field_name = _field_for_column(col, header_map)
                 if field_name is None or field_name in values:
                     continue
-                if field_name == ITEM:
-                    values[ITEM] = _display_number(cell.value, cell.number_format)
+                if field_name in {ITEM, UPC}:
+                    values[field_name] = _display_number(cell.value, cell.number_format)
                 elif field_name == QUANTITY:
                     values[QUANTITY] = _to_int(cell.value)
                 else:
                     values[field_name] = _text(cell.value)
 
-            upc = _text(values.get(ITEM))
+            # Prefer the dedicated UPC column when the packing list has one;
+            # fall back to Item for older exports that only print Item.
+            upc = _text(values.get(UPC)) or _text(values.get(ITEM))
             quantity = values.get(QUANTITY)
             if not upc:
                 continue
@@ -416,6 +470,7 @@ def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
                     "UPCs": upc,
                     "Box Number": current.box_number,
                     "Quantity": int(quantity),
+                    "Item": _text(values.get(ITEM)),
                     "Size": _text(values.get(SIZE)),
                     "Description": _text(values.get(DESCRIPTION)),
                     "Unit of Measure Code": _text(values.get(UOM)),
