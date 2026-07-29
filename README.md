@@ -34,6 +34,14 @@ streamlit run app.py
 Then upload the `.xlsx` packing list and use **Download Excel (both tabs)**, or
 grab either tab on its own as CSV.
 
+## Deploying
+
+`requirements.txt` deliberately uses lower bounds rather than exact pins so the
+host installs prebuilt wheels for whichever Python it runs. Exact pins such as
+`pandas==2.1.3` have no wheels for Python 3.13, which forces pip to compile
+pandas from source and makes a Streamlit Community Cloud deploy take many
+minutes or fail outright.
+
 ## Options
 
 - **Combine duplicate UPCs per box** (default off) — the packing list has one

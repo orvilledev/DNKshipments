@@ -1,3 +1,6 @@
-streamlit==1.52.2
-pandas==2.1.3
-openpyxl==3.1.2
+# Lower bounds, not exact pins, so pip can pick prebuilt wheels for whichever
+# Python the host runs. Pinning pandas==2.1.3 forced a source build on Python
+# 3.13 and made deploys take many minutes.
+streamlit>=1.49,<2
+pandas>=2.2.3,<3
+openpyxl>=3.1,<4
