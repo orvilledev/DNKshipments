@@ -1,0 +1,514 @@
+"""Parse "Package Content List" export workbooks into a flat box-contents table."""
+
+from __future__ import annotations
+
+import io
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import openpyxl
+import pandas as pd
+from openpyxl.styles import Font
+
+CARTON_LABEL = "carton no:"
+CARTON_TOTAL_LABEL = "carton total:"
+ORDER_LABEL = "order no."
+GRAND_TOTAL_LABEL = "total # of cartons:"
+GRAND_QTY_LABEL = "total quantity:"
+
+ITEM = "item"
+SIZE = "size"
+DESCRIPTION = "description"
+QUANTITY = "quantity"
+UOM = "uom"
+
+HEADER_ALIASES = {
+    "item": ITEM,
+    "item no": ITEM,
+    "item no.": ITEM,
+    "item number": ITEM,
+    "size": SIZE,
+    "description": DESCRIPTION,
+    "quantity": QUANTITY,
+    "qty": QUANTITY,
+    "unit of measure code": UOM,
+    "unit of measure": UOM,
+    "uom": UOM,
+}
+
+CARTON_SEQ_RE = re.compile(r"carton:\s*(\d+)\s*of\s*(\d+)", re.IGNORECASE)
+DIMENSIONS_RE = re.compile(r"dimensions:\s*(.+)", re.IGNORECASE)
+NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+OUTPUT_COLUMNS = ["UPCs", "Box Number", "Quantity"]
+DIMENSION_COLUMNS = ["Box Number", "Length", "Width", "Height"]
+
+
+class PackingListError(Exception):
+    """Raised when a workbook does not look like a Package Content List export."""
+
+
+@dataclass
+class Carton:
+    box_number: int
+    carton_no: str = ""
+    dimensions: str = ""
+    order_no: str = ""
+    reported_total: int | None = None
+    sheet: str = ""
+    length: float | None = None
+    width: float | None = None
+    height: float | None = None
+    lines: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def parsed_total(self) -> int:
+        return sum(line["Quantity"] for line in self.lines)
+
+
+@dataclass
+class ParsedPackingList:
+    cartons: list[Carton]
+    lines: pd.DataFrame
+    reported_carton_count: int | None = None
+    reported_total_quantity: int | None = None
+    order_numbers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def total_quantity(self) -> int:
+        return int(self.lines["Quantity"].sum()) if not self.lines.empty else 0
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _display_number(value: Any, number_format: str | None) -> str:
+    """Render a cell the way Excel shows it, honouring zero-padded formats.
+
+    Item numbers such as 50020202 are stored as integers but carry a "000000000"
+    format, so the printed packing list shows 050020202. Dropping that leading
+    zero would corrupt the UPC.
+    """
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int):
+        return _text(value)
+
+    fmt = (number_format or "").split(";")[0].strip().strip('"')
+    if fmt and set(fmt) <= {"0"}:
+        return str(abs(value)).zfill(len(fmt)) if value >= 0 else str(value)
+    return str(value)
+
+
+def parse_dimensions(text: str) -> tuple[float | None, float | None, float | None]:
+    """Split a dimensions string such as "31x19x14" into length, width, height.
+
+    The three numbers are read in printed order, so 31x19x14 is length 31,
+    width 19, height 14. Separators other than "x" and trailing units are
+    tolerated.
+    """
+    if not text:
+        return (None, None, None)
+
+    normalised = re.sub(r"[×✕✖*]", "x", str(text))
+    parts = re.split(r"x", normalised, flags=re.IGNORECASE)
+    numbers = [NUMBER_RE.search(part) for part in parts]
+    values = [float(m.group(0).replace(",", ".")) for m in numbers if m]
+
+    if len(values) < 3:
+        # Fall back to any three numbers in the string, e.g. "L31 W19 H14".
+        values = [
+            float(m.group(0).replace(",", "."))
+            for m in NUMBER_RE.finditer(normalised)
+        ]
+
+    if len(values) < 3:
+        return (None, None, None)
+    return (values[0], values[1], values[2])
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(round(value))
+    text = _text(value).replace(",", "")
+    if not text:
+        return None
+    try:
+        return int(round(float(text)))
+    except ValueError:
+        return None
+
+
+def _row_cells(row: tuple[Any, ...]) -> list[tuple[int, Any]]:
+    """Non-empty cells of a row as (column index, cell) pairs."""
+    return [(cell.column, cell) for cell in row if _text(cell.value) != ""]
+
+
+def _row_labels(cells: list[tuple[int, Any]]) -> dict[int, str]:
+    return {col: _text(cell.value).lower() for col, cell in cells}
+
+
+def _find_label(labels: dict[int, str], needle: str) -> int | None:
+    for col, text in labels.items():
+        if text == needle or text.startswith(needle):
+            return col
+    return None
+
+
+def _header_map(cells: list[tuple[int, Any]]) -> tuple[dict[int, str], bool] | None:
+    """Map the column of each recognised header to its canonical field name.
+
+    Returns ``(headers, is_complete)``, where a complete row carries both Item
+    and Quantity. "Unit of Measure Code" is printed on its own row above the
+    other headers, so partial rows are reported too. ``None`` means the row is
+    not a header row at all.
+    """
+    found: dict[int, str] = {}
+    for col, cell in cells:
+        key = _text(cell.value).lower().rstrip(":")
+        field_name = HEADER_ALIASES.get(key)
+        if field_name is None:
+            return None
+        found[col] = field_name
+    if not found:
+        return None
+    complete = ITEM in found.values() and QUANTITY in found.values()
+    return found, complete
+
+
+def _field_for_column(column: int, header_map: dict[int, str]) -> str | None:
+    """Assign a value cell to a header.
+
+    Values are not always left-aligned with their header (sizes sit one column
+    right of the "Size" label), so each value belongs to the nearest header at
+    or to the left of it.
+    """
+    candidates = [col for col in header_map if col <= column]
+    if not candidates:
+        return None
+    return header_map[max(candidates)]
+
+
+def _load_workbook(source: bytes | str | io.BytesIO) -> openpyxl.Workbook:
+    if isinstance(source, bytes):
+        source = io.BytesIO(source)
+    try:
+        return openpyxl.load_workbook(source, data_only=True)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a message
+        raise PackingListError(
+            "Could not read that workbook. Please upload the .xlsx Package "
+            f"Content List export (openpyxl said: {exc})."
+        ) from exc
+
+
+def parse_packing_list(source: bytes | str | io.BytesIO) -> ParsedPackingList:
+    workbook = _load_workbook(source)
+
+    cartons: list[Carton] = []
+    warnings: list[str] = []
+    order_numbers: list[str] = []
+    reported_carton_count: int | None = None
+    reported_total_quantity: int | None = None
+
+    current: Carton | None = None
+    header_map: dict[int, str] | None = None
+    pending_headers: dict[int, str] = {}
+    current_order = ""
+
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows():
+            cells = _row_cells(row)
+            if not cells:
+                continue
+            labels = _row_labels(cells)
+            row_number = cells[0][1].row
+
+            order_col = _find_label(labels, ORDER_LABEL)
+            if order_col is not None:
+                value = next(
+                    (_text(c.value) for col, c in cells if col > order_col), ""
+                )
+                if value:
+                    current_order = value
+                    if value not in order_numbers:
+                        order_numbers.append(value)
+                continue
+
+            total_col = _find_label(labels, GRAND_TOTAL_LABEL)
+            if total_col is not None:
+                reported_carton_count = next(
+                    (
+                        _to_int(c.value)
+                        for col, c in cells
+                        if col > total_col and _to_int(c.value) is not None
+                    ),
+                    reported_carton_count,
+                )
+                qty_col = _find_label(labels, GRAND_QTY_LABEL)
+                if qty_col is not None:
+                    reported_total_quantity = next(
+                        (
+                            _to_int(c.value)
+                            for col, c in cells
+                            if col > qty_col and _to_int(c.value) is not None
+                        ),
+                        reported_total_quantity,
+                    )
+                current = None
+                continue
+
+            carton_col = _find_label(labels, CARTON_LABEL)
+            if carton_col is not None:
+                carton_no = ""
+                dimensions = ""
+                seq: int | None = None
+                for col, cell in cells:
+                    if col <= carton_col:
+                        continue
+                    text = _text(cell.value)
+                    match = CARTON_SEQ_RE.search(text)
+                    if match:
+                        seq = int(match.group(1))
+                        continue
+                    dims = DIMENSIONS_RE.search(text)
+                    if dims:
+                        dimensions = dims.group(1).strip()
+                        continue
+                    if not carton_no:
+                        carton_no = text
+
+                # A carton continued onto a new print page repeats its header;
+                # keep appending to the same carton instead of duplicating it.
+                if (
+                    current is not None
+                    and carton_no
+                    and carton_no == current.carton_no
+                    and (seq is None or seq == current.box_number)
+                ):
+                    continue
+
+                box_number = seq if seq is not None else len(cartons) + 1
+                if seq is not None and seq != len(cartons) + 1:
+                    warnings.append(
+                        f"Carton {carton_no or '(no number)'} is labelled "
+                        f"'Carton: {seq}' but is block #{len(cartons) + 1} in the file."
+                    )
+                length, width, height = parse_dimensions(dimensions)
+                current = Carton(
+                    box_number=box_number,
+                    carton_no=carton_no,
+                    dimensions=dimensions,
+                    order_no=current_order,
+                    sheet=worksheet.title,
+                    length=length,
+                    width=width,
+                    height=height,
+                )
+                cartons.append(current)
+                header_map = None
+                pending_headers = {}
+                continue
+
+            carton_total_col = _find_label(labels, CARTON_TOTAL_LABEL)
+            if carton_total_col is not None:
+                if current is not None:
+                    current.reported_total = next(
+                        (
+                            _to_int(c.value)
+                            for col, c in cells
+                            if col > carton_total_col and _to_int(c.value) is not None
+                        ),
+                        None,
+                    )
+                header_map = None
+                pending_headers = {}
+                continue
+
+            maybe_header = _header_map(cells)
+            if maybe_header is not None:
+                found, complete = maybe_header
+                if complete:
+                    header_map = {**pending_headers, **found}
+                    pending_headers = {}
+                elif header_map is not None:
+                    header_map.update(found)
+                else:
+                    pending_headers.update(found)
+                continue
+
+            if current is None or header_map is None:
+                continue
+
+            values: dict[str, Any] = {}
+            for col, cell in cells:
+                field_name = _field_for_column(col, header_map)
+                if field_name is None or field_name in values:
+                    continue
+                if field_name == ITEM:
+                    values[ITEM] = _display_number(cell.value, cell.number_format)
+                elif field_name == QUANTITY:
+                    values[QUANTITY] = _to_int(cell.value)
+                else:
+                    values[field_name] = _text(cell.value)
+
+            upc = _text(values.get(ITEM))
+            quantity = values.get(QUANTITY)
+            if not upc:
+                continue
+            if quantity is None:
+                warnings.append(
+                    f"{worksheet.title}!row {row_number}: item {upc} has no quantity "
+                    "and was skipped."
+                )
+                continue
+
+            current.lines.append(
+                {
+                    "UPCs": upc,
+                    "Box Number": current.box_number,
+                    "Quantity": int(quantity),
+                    "Size": _text(values.get(SIZE)),
+                    "Description": _text(values.get(DESCRIPTION)),
+                    "Unit of Measure Code": _text(values.get(UOM)),
+                    "Carton No": current.carton_no,
+                    "Dimensions": current.dimensions,
+                    "Order No": current.order_no,
+                    "Source Row": f"{worksheet.title}!{row_number}",
+                }
+            )
+
+    if not cartons:
+        raise PackingListError(
+            "No cartons were found. This app expects the 'Package Content List' "
+            "export, which has rows starting with 'Carton No:'."
+        )
+
+    all_lines = [line for carton in cartons for line in carton.lines]
+    if not all_lines:
+        raise PackingListError(
+            "Cartons were found but none of them contained item rows."
+        )
+
+    for carton in cartons:
+        if carton.reported_total is not None and carton.reported_total != carton.parsed_total:
+            warnings.append(
+                f"Box {carton.box_number} ({carton.carton_no}): file says Carton "
+                f"Total {carton.reported_total} but the item rows add up to "
+                f"{carton.parsed_total}."
+            )
+        if carton.length is None:
+            warnings.append(
+                f"Box {carton.box_number} ({carton.carton_no}): could not read "
+                + (
+                    f"dimensions from '{carton.dimensions}'."
+                    if carton.dimensions
+                    else "dimensions, the carton row has none."
+                )
+            )
+
+    lines = pd.DataFrame(all_lines)
+    return ParsedPackingList(
+        cartons=cartons,
+        lines=lines,
+        reported_carton_count=reported_carton_count,
+        reported_total_quantity=reported_total_quantity,
+        order_numbers=order_numbers,
+        warnings=warnings,
+    )
+
+
+def build_output(parsed: ParsedPackingList, combine_duplicates: bool = True) -> pd.DataFrame:
+    """Return the UPCs / Box Number / Quantity table."""
+    output = parsed.lines[OUTPUT_COLUMNS].copy()
+    if combine_duplicates:
+        output = (
+            output.groupby(["Box Number", "UPCs"], as_index=False, sort=False)["Quantity"]
+            .sum()
+            .loc[:, OUTPUT_COLUMNS]
+        )
+    output = output.sort_values(
+        ["Box Number"], kind="stable", ignore_index=True
+    )
+    output["Box Number"] = output["Box Number"].astype(int)
+    output["Quantity"] = output["Quantity"].astype(int)
+    return output
+
+
+def build_dimensions(
+    parsed: ParsedPackingList, include_box_number: bool = True
+) -> pd.DataFrame:
+    """Return one row per box with its Length, Width and Height."""
+    rows = [
+        {
+            "Box Number": carton.box_number,
+            "Length": carton.length,
+            "Width": carton.width,
+            "Height": carton.height,
+        }
+        for carton in parsed.cartons
+    ]
+    dimensions = pd.DataFrame(rows, columns=DIMENSION_COLUMNS)
+    dimensions = dimensions.drop_duplicates(subset=["Box Number"], keep="first")
+    dimensions = dimensions.sort_values("Box Number", kind="stable", ignore_index=True)
+    dimensions["Box Number"] = dimensions["Box Number"].astype(int)
+
+    for column in ("Length", "Width", "Height"):
+        values = pd.to_numeric(dimensions[column], errors="coerce")
+        present = values.dropna()
+        # Whole numbers should read as 31, not 31.0.
+        if not present.empty and (present % 1 == 0).all():
+            values = values.astype("Int64")
+        dimensions[column] = values
+
+    if not include_box_number:
+        dimensions = dimensions.drop(columns=["Box Number"])
+    return dimensions
+
+
+def to_excel_bytes(
+    output: pd.DataFrame,
+    dimensions: pd.DataFrame | None = None,
+    detail: pd.DataFrame | None = None,
+    sheet_name: str = "Box Contents",
+    dimensions_sheet_name: str = "Box Dimensions",
+) -> bytes:
+    buffer = io.BytesIO()
+    sheets: list[tuple[str, pd.DataFrame]] = [(sheet_name, output)]
+    if dimensions is not None and not dimensions.empty:
+        sheets.append((dimensions_sheet_name, dimensions))
+    if detail is not None and not detail.empty:
+        sheets.append(("Details", detail))
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for name, frame in sheets:
+            frame.to_excel(writer, index=False, sheet_name=name)
+
+        for name, frame in sheets:
+            worksheet = writer.sheets[name]
+            for cell in worksheet[1]:
+                cell.font = Font(bold=True)
+            worksheet.freeze_panes = "A2"
+            for index, column in enumerate(frame.columns, start=1):
+                letter = openpyxl.utils.get_column_letter(index)
+                width = max(len(str(column)), 12)
+                if not frame.empty:
+                    width = max(width, int(frame[column].astype(str).str.len().max()) + 2)
+                worksheet.column_dimensions[letter].width = min(width, 46)
+                if column in {"UPCs", "Carton No", "Size", "Order No"}:
+                    for row in worksheet.iter_rows(
+                        min_row=2, min_col=index, max_col=index
+                    ):
+                        for cell in row:
+                            cell.number_format = "@"
+    return buffer.getvalue()
